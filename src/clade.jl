@@ -56,13 +56,23 @@ end
     )
 end
 
-const RANKS = ["strain", "species", "genus", "family", "order", "class", "phylum", "domain", "top"]
+const RANKS =
+    ["strain", "species", "genus", "family", "order", "class", "phylum", "domain", "top"]
 
-const RANK_BY_NAME = Dict(rank => i-1 for (i, rank) in enumerate(RANKS))
+const RANK_BY_NAME = Dict(rank => i - 1 for (i, rank) in enumerate(RANKS))
 
 function Base.show(io::IO, x::Clade)
     suffix = x.ngenomes == 1 ? "" : "s"
-    print(io, titlecase(RANKS[x.rank + 1]), " \"", x.name, "\", ", x.ngenomes, " genome", suffix)
+    print(
+        io,
+        titlecase(RANKS[x.rank + 1]),
+        " \"",
+        x.name,
+        "\", ",
+        x.ngenomes,
+        " genome",
+        suffix,
+    )
 end
 
 function Base.show(io::IO, ::MIME"text/plain", x::Clade)

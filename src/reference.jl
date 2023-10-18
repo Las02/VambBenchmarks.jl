@@ -252,15 +252,18 @@ function parse_bins(
     seqs_by_binname
 end
 
-const JSON_VERSION = 1
+const JSON_VERSION = 2
+# [(name, flags, [(sourcename, length)])]
+const GENOMES_JSON_T = Vector{Tuple{String, Int, Vector{Tuple{String, Int}}}}
+# [Sequence => sequence_length, [(subject, from, to)]]
+const SEQUENCES_JSON_T = Vector{Tuple{String, Int, Vector{Tuple{String, Int, Int}}}}                   # [[(child, parent)], [(parent, grandparent)] ...]
+const TAXMAPS_JSON_T = Vector{Vector{Tuple{String, String}}}
+
 struct ReferenceJSON
     version::Int
-    # [(name, flags, [(sourcename, length)])]
-    genomes::Vector{Tuple{String, Int, Vector{Tuple{String, Int}}}}
-    # [Sequence => sequence_length, [(subject, from, to)]]
-    sequences::Vector{Tuple{String, Int, Vector{Tuple{String, Int, Int}}}}
-    # [[(child, parent)], [(parent, grandparent)] ...]
-    taxmaps::Vector{Vector{Tuple{String, Union{String, Nothing}}}}
+    genomes::GENOMES_JSON_T
+    sequences::SEQUENCES_JSON_T
+    taxmaps::TAXMAPS_JSON_T
 end
 StructTypes.StructType(::Type{ReferenceJSON}) = StructTypes.Struct()
 
@@ -329,12 +332,13 @@ function save(io::IO, ref::Reference)
     json_dict = Dict{Symbol, Any}()
     json_dict[:version] = JSON_VERSION
     # Genomes
-    json_dict[:genomes] = [
+    genomes::GENOMES_JSON_T = [
         (genome.name, Int(genome.flags.x), [(s.name, s.length) for s in genome.sources]) for genome in ref.genomes
     ]
+    json_dict[:genomes] = genomes
 
     # Sequences
-    json_dict[:sequences] = [
+    sequences::SEQUENCES_JSON_T = [
         (
             seq.name,
             seq.length,
@@ -342,44 +346,55 @@ function save(io::IO, ref::Reference)
         ) for (_, (seq, targets)) in ref.targets_by_name
     ]
 
+    json_dict[:sequences] = sequences
+
     # Taxmaps
-    taxmaps = [
-        Tuple{String, Union{String, Nothing}}[
-            (genome.name, genome.parent.name) for genome in ref.genomes
-        ],
-    ]
+    taxmaps::TAXMAPS_JSON_T =
+        [[(genome.name, genome.parent.name) for genome in ref.genomes]]
     json_dict[:taxmaps] = taxmaps
+
     for clades in ref.clades
+        length(clades) == 1 && isnothing(only(clades).parent) && break
         v = eltype(taxmaps)()
         push!(taxmaps, v)
         for clade in clades
-            parent = clade.parent
-            value = parent === nothing ? nothing : parent.name
-            push!(v, (clade.name, value))
+            parent = clade.parent::Clade
+            push!(v, (clade.name, parent.name))
         end
     end
 
     JSON3.write(io, json_dict)
 end
 
+# Invariants for the input list:
+# The input is a vector of ranks, consisting of (child, parent) names
+# On every rank, the children is a unique set (each child present once)
+# of the parent of the previous rank:
+#   - On the first rank, the children is a unique set of genome names
+#   - On the last rank, the parent names can be arbitrary.
+#     If there is more than a single unique name, then a top node will be added
 function parse_taxonomy(
     genomes::Set{Genome},
-    dict::Vector{Vector{Tuple{String, Union{String, Nothing}}}},
+    taxmaps::Vector{Vector{Tuple{String, String}}},
 )::Vector{Vector{Clade{Genome}}}
     child_by_name = Dict{String, Node}(g.name => g for g in genomes)
+    assigned_children_names = Set{String}()
     parent_by_name = empty(child_by_name)
     result = Vector{Vector{Clade{Genome}}}()
-    for (rank, taxmap) in enumerate(dict)
+    for (rank, taxmap) in enumerate(taxmaps)
         cladeset = Clade{Genome}[]
-        for (child_name, maybe_parent_name) in taxmap
+        empty!(assigned_children_names)
+        for (child_name, parent_name) in taxmap
+            child_name ∈ assigned_children_names && error(
+                lazy"At rank $(rank), child \"$(child_name)\" is present more than once.",
+            )
             # Get child
             child = get(child_by_name, child_name, nothing)
             child === nothing && error(
-                "At rank $rank, found child name \"$child_name\", but this does not exist " *
+                lazy"At rank $(rank), found child name \"$(child_name)\", but this does not exist " *
                 "on the previous rank.",
             )
             # Create parent if it does not already exist
-            parent_name = maybe_parent_name === nothing ? child_name : maybe_parent_name
             parent =
                 get(parent_by_name, parent_name, nothing)::Union{Clade{Genome}, Nothing}
             if parent === nothing
@@ -388,35 +403,25 @@ function parse_taxonomy(
                 push!(cladeset, parent)
             else
                 add_child!(parent, child)
-                child.parent = parent::Clade{Genome}
             end
+            push!(assigned_children_names, child_name)
         end
-        # Enforce all childrens have parents
-        for child in values(child_by_name)
-            isdefined(child, :parent) ||
-                error("At rank $rank, child $(child.name) has no parent")
+        if length(assigned_children_names) != length(child_by_name)
+            missing_child = first(setdiff(keys(child_by_name), assigned_children_names))
+            error(lazy"At rank $(rank), child $(missing_child) has no parent")
         end
         parent_by_name, child_by_name = child_by_name, parent_by_name
         empty!(parent_by_name)
         push!(result, cladeset)
     end
-    # If there isn't exactly one remaining clade at the top, make one.
-    if length(child_by_name) != 1 || only(values(child_by_name)) isa Genome
-        top = Clade("top", first(values(child_by_name)))
-        for child in values(child_by_name)
-            child === first(top.children) || add_child!(top, child)
+    # Create top node, if needed
+    if length(last(result)) > 1
+        top = Clade("top", first(last(result)))
+        for child in @view(result[end][2:end])
+            add_child!(top, child)
         end
         push!(result, [top])
-    else
-        top = only(values(child_by_name))::Clade{Genome}
-        # If multiple redundant top clades, go down to the useful level
-        while nchildren(top) == 1 && only(top.children).name == top.name
-            top = only(top.children)::Clade{Genome}
-            top.parent = nothing
-            pop!(result)
-        end
     end
-    @assert length(last(result)) == 1
     foreach(i -> sort!(i; by=j -> j.name), result)
     return result
 end

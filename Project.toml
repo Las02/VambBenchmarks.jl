@@ -1,7 +1,7 @@
 name = "VambBenchmarks"
 uuid = "63a9268e-b9e5-4a07-aba6-1f52d4878f75"
 authors = ["Jakob Nybo Nissen <jakobnybonissen@gmail.com>"]
-version = "0.1.2"
+version = "0.2.0"
 
 [deps]
 AbstractTrees = "1520ce14-60c1-5f80-bbc7-55ef81b5835c"
